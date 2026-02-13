@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.base.schema.json",
+  "name": "ALR Java Development",
+  "image": "ghcr.io/cs389l-web/alr-pa-env/alr-java:25.11-trixie",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "vscjava.vscode-java-pack"
+      ]
+    }
+  },
+  "postCreateCommand": "java -version",
+  "remoteUser": "vscode"
+}
