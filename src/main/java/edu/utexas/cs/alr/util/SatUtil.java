@@ -8,7 +8,7 @@ import edu.utexas.cs.alr.ast.VarExpr;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -18,7 +18,256 @@ public class SatUtil {
     {
         List<List<Long>> clauses = new ArrayList<>();
         collectClauses(expr, clauses);
-        return dpll(clauses, new HashMap<>());
+        return solveCdcl(clauses);
+    }
+
+    private static boolean solveCdcl(List<List<Long>> clauses)
+    {
+        SolverState state = new SolverState(clauses);
+
+        while (true)
+        {
+            Integer conflictClause = propagate(state);
+            if (conflictClause != null)
+            {
+                if (state.decisionLevel == 0)
+                    return false;
+
+                LearnedClause learned = analyzeConflict(state, conflictClause);
+                if (learned.clause.isEmpty())
+                    return false;
+
+                backtrack(state, learned.backtrackLevel);
+                int learnedIndex = state.clauses.size();
+                state.clauses.add(learned.clause);
+                enqueue(state, learned.assertingLiteral, learnedIndex);
+                continue;
+            }
+
+            Long decisionLiteral = pickDecisionLiteral(state);
+            if (decisionLiteral == null)
+                return true;
+
+            state.decisionLevel++;
+            state.levelStart.add(state.trail.size());
+            enqueue(state, decisionLiteral, null);
+        }
+    }
+
+    private static Integer propagate(SolverState state)
+    {
+        while (true)
+        {
+            boolean changed = false;
+
+            for (int i = 0; i < state.clauses.size(); i++)
+            {
+                List<Long> clause = state.clauses.get(i);
+
+                boolean satisfied = false;
+                int unassignedCount = 0;
+                long lastUnassigned = 0;
+
+                for (long lit : clause)
+                {
+                    Boolean value = literalValue(state.assignment, lit);
+                    if (value == null)
+                    {
+                        unassignedCount++;
+                        lastUnassigned = lit;
+                    }
+                    else if (value)
+                    {
+                        satisfied = true;
+                        break;
+                    }
+                }
+
+                if (satisfied)
+                    continue;
+
+                if (unassignedCount == 0)
+                    return i;
+
+                if (unassignedCount == 1)
+                {
+                    if (!enqueue(state, lastUnassigned, i))
+                        return i;
+                    changed = true;
+                }
+            }
+
+            if (!changed)
+                return null;
+        }
+    }
+
+    private static LearnedClause analyzeConflict(SolverState state, int conflictClauseIdx)
+    {
+        List<Long> learned = new ArrayList<>(state.clauses.get(conflictClauseIdx));
+
+        while (countLiteralsAtLevel(learned, state, state.decisionLevel) > 1)
+        {
+            long pivot = latestAssignedLiteralAtLevel(learned, state, state.decisionLevel);
+            Assignment pivotAssignment = state.assignment.get(Math.abs(pivot));
+
+            if (pivotAssignment == null || pivotAssignment.reasonClause == null)
+                break;
+
+            List<Long> reason = state.clauses.get(pivotAssignment.reasonClause);
+            learned = resolve(learned, reason, pivot);
+        }
+
+        long assertingLiteral = 0;
+        int currentLevelCount = 0;
+        int backtrackLevel = 0;
+
+        for (long lit : learned)
+        {
+            Assignment a = state.assignment.get(Math.abs(lit));
+            int level = a == null ? 0 : a.level;
+
+            if (level == state.decisionLevel)
+            {
+                currentLevelCount++;
+                assertingLiteral = lit;
+            }
+            else if (level > backtrackLevel)
+            {
+                backtrackLevel = level;
+            }
+        }
+
+        if (currentLevelCount == 0)
+        {
+            if (!learned.isEmpty())
+                assertingLiteral = learned.get(0);
+            backtrackLevel = 0;
+        }
+
+        return new LearnedClause(learned, assertingLiteral, backtrackLevel);
+    }
+
+    private static List<Long> resolve(List<Long> a, List<Long> b, long pivot)
+    {
+        Set<Long> merged = new LinkedHashSet<>();
+
+        for (long lit : a)
+        {
+            if (lit != pivot)
+                merged.add(lit);
+        }
+
+        for (long lit : b)
+        {
+            if (lit != -pivot)
+                merged.add(lit);
+        }
+
+        return new ArrayList<>(merged);
+    }
+
+    private static int countLiteralsAtLevel(List<Long> clause, SolverState state, int level)
+    {
+        int count = 0;
+        for (long lit : clause)
+        {
+            Assignment a = state.assignment.get(Math.abs(lit));
+            if (a != null && a.level == level)
+                count++;
+        }
+        return count;
+    }
+
+    private static long latestAssignedLiteralAtLevel(List<Long> clause, SolverState state, int level)
+    {
+        for (int i = state.trail.size() - 1; i >= 0; i--)
+        {
+            long lit = state.trail.get(i);
+            long var = Math.abs(lit);
+            if (!containsLiteral(clause, var))
+                continue;
+
+            Assignment a = state.assignment.get(var);
+            if (a != null && a.level == level)
+            {
+                if (containsExactLiteral(clause, lit))
+                    return lit;
+                return -lit;
+            }
+        }
+
+        return clause.get(0);
+    }
+
+    private static boolean containsLiteral(List<Long> clause, long var)
+    {
+        for (long lit : clause)
+        {
+            if (Math.abs(lit) == var)
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean containsExactLiteral(List<Long> clause, long lit)
+    {
+        for (long cLit : clause)
+        {
+            if (cLit == lit)
+                return true;
+        }
+        return false;
+    }
+
+    private static void backtrack(SolverState state, int level)
+    {
+        while (state.decisionLevel > level)
+        {
+            int start = state.levelStart.remove(state.levelStart.size() - 1);
+            for (int i = state.trail.size() - 1; i >= start; i--)
+            {
+                long lit = state.trail.remove(i);
+                state.assignment.remove(Math.abs(lit));
+            }
+            state.decisionLevel--;
+        }
+    }
+
+    private static Long pickDecisionLiteral(SolverState state)
+    {
+        for (List<Long> clause : state.clauses)
+        {
+            for (long lit : clause)
+            {
+                long var = Math.abs(lit);
+                if (!state.assignment.containsKey(var))
+                    return var;
+            }
+        }
+        return null;
+    }
+
+    private static boolean enqueue(SolverState state, long lit, Integer reasonClause)
+    {
+        long var = Math.abs(lit);
+        boolean value = lit > 0;
+        Assignment existing = state.assignment.get(var);
+
+        if (existing != null)
+            return existing.value == value;
+
+        state.assignment.put(var, new Assignment(value, state.decisionLevel, reasonClause));
+        state.trail.add(value ? var : -var);
+        return true;
+    }
+
+    private static Boolean literalValue(Map<Long, Assignment> assignment, long lit)
+    {
+        Assignment a = assignment.get(Math.abs(lit));
+        if (a == null)
+            return null;
+        return lit > 0 ? a.value : !a.value;
     }
 
     private static void collectClauses(Expr expr, List<List<Long>> clauses)
@@ -31,7 +280,7 @@ public class SatUtil {
             return;
         }
 
-        Set<Long> literals = new HashSet<>();
+        Set<Long> literals = new LinkedHashSet<>();
         collectClauseLiterals(expr, literals);
 
         for (long lit : literals)
@@ -67,151 +316,45 @@ public class SatUtil {
         throw new IllegalArgumentException("Expected CNF literal but found: " + expr.getKind());
     }
 
-    private static boolean dpll(List<List<Long>> clauses, Map<Long, Boolean> assignment)
+    private static final class SolverState
     {
-        while (true)
+        private final List<List<Long>> clauses;
+        private final Map<Long, Assignment> assignment = new HashMap<>();
+        private final List<Long> trail = new ArrayList<>();
+        private final List<Integer> levelStart = new ArrayList<>();
+        private int decisionLevel = 0;
+
+        private SolverState(List<List<Long>> clauses)
         {
-            boolean changed = false;
-
-            for (List<Long> clause : clauses)
-            {
-                ClauseState state = analyzeClause(clause, assignment);
-                if (state.satisfied)
-                    continue;
-
-                if (state.unassignedCount == 0)
-                    return false;
-
-                if (state.unassignedCount == 1)
-                {
-                    if (!assignLiteral(assignment, state.lastUnassignedLiteral))
-                        return false;
-                    changed = true;
-                }
-            }
-
-            Map<Long, Integer> polarity = new HashMap<>();
-            for (List<Long> clause : clauses)
-            {
-                ClauseState state = analyzeClause(clause, assignment);
-                if (state.satisfied)
-                    continue;
-
-                for (long lit : clause)
-                {
-                    long var = Math.abs(lit);
-                    if (assignment.containsKey(var))
-                        continue;
-
-                    int signMask = lit > 0 ? 1 : 2;
-                    polarity.put(var, polarity.getOrDefault(var, 0) | signMask);
-                }
-            }
-
-            for (Map.Entry<Long, Integer> entry : polarity.entrySet())
-            {
-                int signMask = entry.getValue();
-                if (signMask == 1 || signMask == 2)
-                {
-                    long lit = signMask == 1 ? entry.getKey() : -entry.getKey();
-                    if (!assignLiteral(assignment, lit))
-                        return false;
-                    changed = true;
-                }
-            }
-
-            if (!changed)
-                break;
+            this.clauses = new ArrayList<>(clauses);
         }
-
-        boolean allSatisfied = true;
-        for (List<Long> clause : clauses)
-        {
-            ClauseState state = analyzeClause(clause, assignment);
-            if (!state.satisfied)
-            {
-                allSatisfied = false;
-                break;
-            }
-        }
-
-        if (allSatisfied)
-            return true;
-
-        long branchVar = pickBranchVariable(clauses, assignment);
-        if (branchVar == -1)
-            return false;
-
-        Map<Long, Boolean> leftAssignment = new HashMap<>(assignment);
-        leftAssignment.put(branchVar, true);
-        if (dpll(clauses, leftAssignment))
-            return true;
-
-        Map<Long, Boolean> rightAssignment = new HashMap<>(assignment);
-        rightAssignment.put(branchVar, false);
-        return dpll(clauses, rightAssignment);
     }
 
-    private static long pickBranchVariable(List<List<Long>> clauses, Map<Long, Boolean> assignment)
+    private static final class Assignment
     {
-        for (List<Long> clause : clauses)
+        private final boolean value;
+        private final int level;
+        private final Integer reasonClause;
+
+        private Assignment(boolean value, int level, Integer reasonClause)
         {
-            ClauseState state = analyzeClause(clause, assignment);
-            if (state.satisfied)
-                continue;
-
-            for (long lit : clause)
-            {
-                long var = Math.abs(lit);
-                if (!assignment.containsKey(var))
-                    return var;
-            }
+            this.value = value;
+            this.level = level;
+            this.reasonClause = reasonClause;
         }
-
-        return -1;
     }
 
-    private static boolean assignLiteral(Map<Long, Boolean> assignment, long lit)
+    private static final class LearnedClause
     {
-        long var = Math.abs(lit);
-        boolean value = lit > 0;
-        Boolean existing = assignment.get(var);
+        private final List<Long> clause;
+        private final long assertingLiteral;
+        private final int backtrackLevel;
 
-        if (existing != null)
-            return existing == value;
-
-        assignment.put(var, value);
-        return true;
-    }
-
-    private static ClauseState analyzeClause(List<Long> clause, Map<Long, Boolean> assignment)
-    {
-        ClauseState state = new ClauseState();
-
-        for (long lit : clause)
+        private LearnedClause(List<Long> clause, long assertingLiteral, int backtrackLevel)
         {
-            long var = Math.abs(lit);
-            Boolean value = assignment.get(var);
-
-            if (value == null)
-            {
-                state.unassignedCount++;
-                state.lastUnassignedLiteral = lit;
-            }
-            else if ((lit > 0 && value) || (lit < 0 && !value))
-            {
-                state.satisfied = true;
-                return state;
-            }
+            this.clause = clause;
+            this.assertingLiteral = assertingLiteral;
+            this.backtrackLevel = backtrackLevel;
         }
-
-        return state;
-    }
-
-    private static final class ClauseState
-    {
-        private boolean satisfied;
-        private int unassignedCount;
-        private long lastUnassignedLiteral;
     }
 }
